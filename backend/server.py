@@ -335,8 +335,8 @@ async def transcribe_chunk(chunk: AudioSegment, chunk_index: int, recording_id: 
         chunk_data = chunk_file.getvalue()
         logger.info(f"Chunk {chunk_index} data size: {len(chunk_data)} bytes")
         
-        # For test mode, we'll return a canned response for small recordings
-        if recording_id in recordings and recordings[recording_id].get("source") == "test":
+        # Only handle test mode for test recordings, not for all recordings
+        if recording_id in recordings and recordings[recording_id].get("source") == "test" and "test_recording" in jobs[job_id].get("recording_id", ""):
             logger.info(f"Test mode detected for recording {recording_id}, returning test transcript")
             jobs[job_id]["status"] = "completed"
             jobs[job_id]["transcript"] = "नमस्ते, यह एक परीक्षण प्रतिलेख है।"
@@ -457,80 +457,220 @@ async def create_recording(
     source: str = "microphone"
 ):
     try:
-        # ALL RECORDINGS USE TEST MODE FOR NOW FOR RELIABILITY
-        # This ensures we can demonstrate the UI functionality reliably while fixing the API integration
+        # Handle test mode properly
+        if audio.filename == "test_recording" or source == 'test':
+            recording_id = str(uuid.uuid4())
+            test_transcript = "नमस्ते, यह एक परीक्षण प्रतिलेख है। हम हिंदी ट्रांसक्रिप्शन टूल का परीक्षण कर रहे हैं।"
+            
+            # Create recording entry
+            recordings[recording_id] = {
+                "id": recording_id,
+                "timestamp": datetime.now(),
+                "duration": 30.0,  # Simulated 30-second recording
+                "status": RecordingStatus.PROCESSING,
+                "transcript": None,
+                "error": None,
+                "source": source,
+                "format": "wav",
+                "chunks_total": 1,
+                "chunks_processed": 0,
+                "chunks_failed": 0,
+                "progress": 0
+            }
+            
+            # Simulate processing delay
+            async def process_test_recording():
+                await asyncio.sleep(2)  # Simulate 2-second processing
+                recordings[recording_id]["status"] = RecordingStatus.COMPLETED
+                recordings[recording_id]["transcript"] = test_transcript
+                recordings[recording_id]["chunks_processed"] = 1
+                recordings[recording_id]["progress"] = 100
+            
+            # Process in background
+            background_tasks.add_task(process_test_recording)
+            
+            return {
+                "recording_id": recording_id,
+                "status": RecordingStatus.PROCESSING,
+                "message": "Test recording is being processed",
+                "source": source,
+                "format": "wav",
+                "chunks_total": 1
+            }
+        
+        # For real recordings, handle properly
+        logger.info(f"Received real recording with source: {source}, filename: {audio.filename}, content_type: {audio.content_type}")
+        
+        # Validate audio source
+        if source not in ["microphone", "system", "combined", "test"]:
+            logger.warning(f"Invalid source: {source}")
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid audio source. Must be 'microphone', 'system', or 'combined'"
+            )
+            
+        # Validate and read file content
+        try:
+            content = await audio.read()
+            if len(content) == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Empty audio file received"
+                )
+            logger.info(f"Successfully read audio file: {len(content)} bytes")
+        except Exception as e:
+            logger.error(f"Error reading audio file: {str(e)}")
+            raise HTTPException(
+                status_code=400,
+                detail="Failed to read audio file"
+            )
+            
+        # Generate recording ID
         recording_id = str(uuid.uuid4())
         
-        # Different test transcripts based on source type
-        test_transcripts = {
-            "microphone": "नमस्ते, यह माइक्रोफोन से रिकॉर्ड किया गया था। हम हिंदी ट्रांसक्रिप्शन टूल का परीक्षण कर रहे हैं।",
-            "system": "नमस्ते, यह सिस्टम ऑडियो से रिकॉर्ड किया गया था। इस टूल का उपयोग स्लैक हडल और अन्य कॉल से हिंदी ऑडियो को प्रतिलेखित करने के लिए किया जा सकता है।",
-            "combined": "नमस्ते, यह माइक्रोफोन और सिस्टम ऑडियो दोनों से रिकॉर्ड किया गया था। यह एक प्रतिलेखण उपकरण है जो हिंदी में वार्तालाप को प्रतिलेखित कर सकता है। हम इस उपकरण का उपयोग मीटिंग और कॉल के दौरान किए गए संवादों का रिकॉर्ड रखने के लिए कर सकते हैं।",
-            "test": "नमस्ते, यह एक परीक्षण प्रतिलेख है। हम हिंदी ट्रांसक्रिप्शन टूल का परीक्षण कर रहे हैं। यह उपकरण हिंदी भाषा में बोले गए शब्दों को सफलतापूर्वक पहचान सकता है और उन्हें टेक्स्ट में बदल सकता है। आप इसका उपयोग अपनी मीटिंग और कॉल के दौरान हिंदी वार्तालापों को रिकॉर्ड करने के लिए कर सकते हैं।"
-        }
+        # Determine format
+        format = "wav"  # Default
+        if audio.content_type:
+            if "webm" in audio.content_type:
+                format = "webm"
+            elif "mp3" in audio.content_type or "mpeg" in audio.content_type:
+                format = "mp3"
+            elif "ogg" in audio.content_type:
+                format = "ogg"
         
-        # Get the appropriate test transcript
-        test_transcript = test_transcripts.get(source, test_transcripts["test"])
+        # Try direct API call for very short recordings
+        if len(content) < 1000000:  # Less than 1MB
+            try:
+                # Convert to base64
+                audio_base64 = base64.b64encode(content).decode('utf-8')
+                
+                # Prepare direct API request
+                headers = {
+                    "Authorization": f"Bearer {SARVAM_API_KEY}",
+                    "Content-Type": "application/json"
+                }
+                
+                data = {
+                    "audio": audio_base64,
+                    "source_lang": "hi",
+                    "task_type": "transcribe",
+                    "audio_format": format
+                }
+                
+                logger.info(f"Sending direct API request for small recording ({len(content)} bytes)")
+                
+                # Create recording entry before API call
+                recordings[recording_id] = {
+                    "id": recording_id,
+                    "timestamp": datetime.now(),
+                    "duration": 0.0,  # Will update
+                    "status": RecordingStatus.PROCESSING,
+                    "transcript": None,
+                    "error": None,
+                    "source": source,
+                    "format": format,
+                    "chunks_total": 1,
+                    "chunks_processed": 0,
+                    "chunks_failed": 0,
+                    "progress": 0
+                }
+                
+                # Function for processing in background
+                async def process_direct_api():
+                    try:
+                        async with aiohttp.ClientSession() as session:
+                            async with session.post(SARVAM_API_URL, headers=headers, json=data, timeout=60) as response:
+                                response_text = await response.text()
+                                logger.info(f"Direct API response status: {response.status}")
+                                
+                                if response.status == 200:
+                                    try:
+                                        result = json.loads(response_text)
+                                        transcript = result.get("text", "").strip()
+                                        
+                                        if transcript:
+                                            recordings[recording_id]["status"] = RecordingStatus.COMPLETED
+                                            recordings[recording_id]["transcript"] = transcript
+                                            recordings[recording_id]["progress"] = 100
+                                            recordings[recording_id]["chunks_processed"] = 1
+                                            logger.info(f"Direct API success: {transcript[:50]}...")
+                                        else:
+                                            recordings[recording_id]["status"] = RecordingStatus.FAILED
+                                            recordings[recording_id]["error"] = "No transcription returned from API"
+                                            logger.warning("Empty transcription received from direct API call")
+                                    except json.JSONDecodeError as e:
+                                        recordings[recording_id]["status"] = RecordingStatus.FAILED
+                                        recordings[recording_id]["error"] = f"Failed to parse API response: {e}"
+                                        logger.error(f"Failed to parse direct API response: {e}, response: {response_text[:100]}...")
+                                else:
+                                    recordings[recording_id]["status"] = RecordingStatus.FAILED
+                                    recordings[recording_id]["error"] = f"API error: Status {response.status}"
+                                    logger.error(f"Direct API error: Status {response.status}, response: {response_text[:100]}...")
+                    except Exception as e:
+                        recordings[recording_id]["status"] = RecordingStatus.FAILED
+                        recordings[recording_id]["error"] = f"API request failed: {str(e)}"
+                        logger.error(f"Error in direct API call: {e}")
+                
+                background_tasks.add_task(process_direct_api)
+                
+                return {
+                    "recording_id": recording_id,
+                    "status": RecordingStatus.PROCESSING,
+                    "message": "Processing small recording directly",
+                    "source": source,
+                    "format": format,
+                    "chunks_total": 1
+                }
+                
+            except Exception as e:
+                logger.error(f"Error in direct API processing: {e}")
+                # Fall back to chunked processing
         
-        # Log file details even though we're in test mode
-        logger.info(f"Received recording with source: {source}, filename: {audio.filename}, content_type: {audio.content_type}")
-        
+        # For larger recordings, use chunking
         try:
-            # Read some content to validate it's not empty
-            content = await audio.read(1024)  # Just read a small amount to verify
-            logger.info(f"File content validated: {len(content)} bytes read")
+            # Split audio into chunks
+            audio_chunks = split_audio(content, format)
+            if not audio_chunks:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not extract valid audio chunks from recording"
+                )
+                
+            # Create recording entry
+            recordings[recording_id] = {
+                "id": recording_id,
+                "timestamp": datetime.now(),
+                "duration": sum(len(chunk) for chunk in audio_chunks) / 1000,  # Duration in seconds
+                "status": RecordingStatus.PROCESSING,
+                "transcript": None,
+                "error": None,
+                "source": source,
+                "format": format,
+                "chunks_total": len(audio_chunks),
+                "chunks_processed": 0,
+                "chunks_failed": 0,
+                "progress": 0
+            }
+            
+            # Process chunks in background
+            background_tasks.add_task(process_recording, recording_id, audio_chunks)
+            
+            return {
+                "recording_id": recording_id,
+                "status": RecordingStatus.PROCESSING,
+                "message": f"Processing {len(audio_chunks)} audio chunks",
+                "source": source,
+                "format": format,
+                "chunks_total": len(audio_chunks)
+            }
+        except HTTPException as e:
+            raise e
         except Exception as e:
-            logger.warning(f"Error reading file: {e}, continuing with test mode anyway")
-        
-        # Calculate chunks - for a more realistic simulation
-        duration = 30  # Default 30 seconds
-        chunks_total = max(1, duration // 480 + (1 if duration % 480 > 0 else 0))  # 8 min (480 sec) chunks
-        
-        # Create recording entry
-        recordings[recording_id] = {
-            "id": recording_id,
-            "timestamp": datetime.now(),
-            "duration": float(duration),
-            "status": RecordingStatus.PROCESSING,
-            "transcript": None,
-            "error": None,
-            "source": source,
-            "format": "wav",
-            "chunks_total": chunks_total,
-            "chunks_processed": 0,
-            "chunks_failed": 0,
-            "progress": 0
-        }
-        
-        # Simulate processing delay and progress updates
-        async def process_test_recording():
-            # Simulate processing time based on duration
-            total_chunks = recordings[recording_id]["chunks_total"]
-            
-            # Update progress incrementally
-            for i in range(total_chunks):
-                await asyncio.sleep(1)  # 1 second per chunk
-                recordings[recording_id]["chunks_processed"] = i + 1
-                recordings[recording_id]["progress"] = int(((i + 1) / total_chunks) * 100)
-                logger.info(f"Test processing: {i+1}/{total_chunks} chunks, {recordings[recording_id]['progress']}% complete")
-            
-            # Set as completed
-            recordings[recording_id]["status"] = RecordingStatus.COMPLETED
-            recordings[recording_id]["transcript"] = test_transcript
-            recordings[recording_id]["progress"] = 100
-            logger.info(f"Test recording {recording_id} completed with transcript: {test_transcript[:50]}...")
-        
-        # Process in background
-        background_tasks.add_task(process_test_recording)
-        
-        return {
-            "recording_id": recording_id,
-            "status": RecordingStatus.PROCESSING,
-            "message": f"Processing recording with {chunks_total} chunks",
-            "source": source,
-            "format": "wav", 
-            "chunks_total": chunks_total
-        }
+            logger.error(f"Error processing audio: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error processing audio: {str(e)}"
+            )
             
     except HTTPException:
         raise
