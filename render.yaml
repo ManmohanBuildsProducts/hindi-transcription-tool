@@ -1,0 +1,35 @@
+services:
+  # Backend API service
+  - type: web
+    name: hindi-transcription-api
+    runtime: python
+    plan: free
+    buildCommand: cd backend && apt-get update && apt-get install -y ffmpeg && pip install -r requirements.txt
+    startCommand: cd backend && uvicorn server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.0
+      - key: SARVAM_API_KEY
+        value: ec7650e8-3560-48c7-8c69-649f1c659680
+      - key: SARVAM_API_URL
+        value: https://api.sarvam.ai/v1/transcribe/batch
+      - key: MONGO_URL
+        sync: false # User needs to set this
+      - key: DB_NAME
+        value: hindi_transcription
+
+  # Frontend React application
+  - type: web
+    name: hindi-transcription-frontend
+    runtime: node
+    plan: free
+    buildCommand: cd frontend && npm i && npm run build
+    startCommand: cd frontend && npx serve -s build
+    envVars:
+      - key: NODE_VERSION
+        value: 16.20.0
+      - key: REACT_APP_BACKEND_URL
+        fromService:
+          name: hindi-transcription-api
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
