@@ -17,6 +17,7 @@ import subprocess
 from pydub import AudioSegment
 import io
 import tempfile
+from sarvam_batch_api import SarvamBatchAPI
 from dotenv import load_dotenv
 
 # Setup environment
@@ -59,7 +60,12 @@ SARVAM_API_KEY = os.environ.get("SARVAM_API_KEY")
 if not SARVAM_API_KEY:
     logger.warning("SARVAM_API_KEY not set in environment, using default test key")
     SARVAM_API_KEY = "ec7650e8-3560-48c7-8c69-649f1c659680"  # Default key, will be used if env var is not set
-SARVAM_API_URL = os.environ.get("SARVAM_API_URL", "https://api.sarvam.ai/v1/asr")
+
+# Sarvam API endpoints - based on successful testing
+SARVAM_API_INIT_URL = "https://api.sarvam.ai/speech-to-text-translate/job/init"
+SARVAM_API_STATUS_URL_TEMPLATE = "https://api.sarvam.ai/speech-to-text-translate/job/{job_id}/status"
+SARVAM_API_SUBMIT_URL = "https://api.sarvam.ai/speech-to-text-translate/job"
+SARVAM_API_URL = SARVAM_API_SUBMIT_URL  # For backward compatibility with existing code
 CHUNK_DURATION = 8 * 60 * 1000  # 8 minutes in milliseconds
 MAX_RETRIES = 3  # Maximum retries for API calls
 
@@ -575,168 +581,82 @@ async def create_recording(
             elif "ogg" in audio.content_type:
                 format = "ogg"
         
-        # Try direct API call for very short recordings
-        if len(content) < 1000000:  # Less than 1MB
-            try:
-                # Convert to base64
-                audio_base64 = base64.b64encode(content).decode('utf-8')
-                
-                # Prepare direct API request
-                headers = {
-                    "Authorization": f"Bearer {SARVAM_API_KEY}",
-                    "Content-Type": "application/json"
-                }
-                
-                # Format according to Sarvam AI ASR API
-                data = {
-                    "audio": {
-                        "data": audio_base64
-                    },
-                    "config": {
-                        "language_code": "hi",
-                        "use_enhanced": True
-                    }
-                }
-                
-                # Log request details (without full audio data)
-                log_data = data.copy()
-                if 'audio' in log_data:
-                    log_data['audio'] = f"[BASE64_DATA_LENGTH:{len(log_data['audio'])}]"
-                logger.info(f"API request data: {log_data}")
-                
-                logger.info(f"Sending direct API request for small recording ({len(content)} bytes)")
-                
-                # Create recording entry before API call
-                recordings[recording_id] = {
-                    "id": recording_id,
-                    "timestamp": datetime.now(),
-                    "duration": 0.0,  # Will update
-                    "status": RecordingStatus.PROCESSING,
-                    "transcript": None,
-                    "error": None,
-                    "source": source,
-                    "format": format,
-                    "chunks_total": 1,
-                    "chunks_processed": 0,
-                    "chunks_failed": 0,
-                    "progress": 0
-                }
-                
-                # Function for processing in background
-                async def process_direct_api():
-                    try:
-                        async with aiohttp.ClientSession() as session:
-                            # Log the full API request for debugging
-                            logger.info(f"API URL: {SARVAM_API_URL}")
-                            logger.info(f"API Headers: Authorization: Bearer {SARVAM_API_KEY[:5]}...{SARVAM_API_KEY[-5:]}, Content-Type: application/json")
-                            
-                            async with session.post(SARVAM_API_URL, headers=headers, json=data, timeout=60) as response:
-                                response_text = await response.text()
-                                logger.info(f"Direct API response status: {response.status}")
-                                logger.info(f"Direct API response headers: {dict(response.headers)}")
-                                logger.info(f"Direct API response full text: {response_text}")
-                                
-                                if response.status == 200:
-                                    try:
-                                        result = json.loads(response_text)
-                                        # Handle different response formats
-                                        if "text" in result:
-                                            # Simple format
-                                            transcript = result.get("text", "").strip()
-                                        elif "results" in result:
-                                            # ASR format with multiple results
-                                            transcript = " ".join([
-                                                alternative.get("transcript", "")
-                                                for result_item in result.get("results", [])
-                                                for alternative in result_item.get("alternatives", [])
-                                            ]).strip()
-                                        else:
-                                            # Unknown format
-                                            logger.warning(f"Unknown response format: {result}")
-                                            transcript = str(result)
-                                        
-                                        if transcript:
-                                            recordings[recording_id]["status"] = RecordingStatus.COMPLETED
-                                            recordings[recording_id]["transcript"] = transcript
-                                            recordings[recording_id]["progress"] = 100
-                                            recordings[recording_id]["chunks_processed"] = 1
-                                            logger.info(f"Direct API success: {transcript[:50]}...")
-                                        else:
-                                            recordings[recording_id]["status"] = RecordingStatus.FAILED
-                                            recordings[recording_id]["error"] = "No transcription returned from API"
-                                            logger.warning("Empty transcription received from direct API call")
-                                    except json.JSONDecodeError as e:
-                                        recordings[recording_id]["status"] = RecordingStatus.FAILED
-                                        recordings[recording_id]["error"] = f"Failed to parse API response: {e}"
-                                        logger.error(f"Failed to parse direct API response: {e}, response: {response_text[:100]}...")
-                                elif response.status == 401 or response.status == 403:
-                                    recordings[recording_id]["status"] = RecordingStatus.FAILED
-                                    recordings[recording_id]["error"] = f"API Authentication error: Status {response.status}. Please check API key."
-                                    logger.error(f"API authentication failed. Status: {response.status}, Response: {response_text}")
-                                elif response.status == 429:
-                                    recordings[recording_id]["status"] = RecordingStatus.FAILED
-                                    recordings[recording_id]["error"] = "API rate limit exceeded. Please try again later."
-                                    logger.error(f"API rate limit exceeded: {response_text}")
-                                else:
-                                    recordings[recording_id]["status"] = RecordingStatus.FAILED
-                                    recordings[recording_id]["error"] = f"API error: Status {response.status}. Please check API documentation for details."
-                                    logger.error(f"Direct API error: Status {response.status}, response: {response_text}")
-                    except Exception as e:
-                        recordings[recording_id]["status"] = RecordingStatus.FAILED
-                        recordings[recording_id]["error"] = f"API request failed: {str(e)}"
-                        logger.error(f"Error in direct API call: {e}")
-                
-                background_tasks.add_task(process_direct_api)
-                
-                return {
-                    "recording_id": recording_id,
-                    "status": RecordingStatus.PROCESSING,
-                    "message": "Processing small recording directly",
-                    "source": source,
-                    "format": format,
-                    "chunks_total": 1
-                }
-                
-            except Exception as e:
-                logger.error(f"Error in direct API processing: {e}")
-                # Fall back to chunked processing
+        # Create recording entry before API call
+        recordings[recording_id] = {
+            "id": recording_id,
+            "timestamp": datetime.now(),
+            "duration": 0.0,  # Will update later
+            "status": RecordingStatus.PROCESSING,
+            "transcript": None,
+            "error": None,
+            "source": source,
+            "format": format,
+            "chunks_total": 1,
+            "chunks_processed": 0,
+            "chunks_failed": 0,
+            "progress": 0
+        }
         
-        # For larger recordings, use chunking
-        try:
-            # Split audio into chunks
-            audio_chunks = split_audio(content, format)
-            if not audio_chunks:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Could not extract valid audio chunks from recording"
-                )
+        # Use the Sarvam Batch API for transcription
+        async def process_with_batch_api():
+            try:
+                # Create API client
+                api_client = SarvamBatchAPI(SARVAM_API_KEY)
                 
-            # Create recording entry
+                # Call the API
+                logger.info(f"Processing recording {recording_id} with Sarvam Batch API")
+                success, result = await api_client.transcribe_audio(content, source_lang="hi")
+                
+                if success:
+                    logger.info(f"Successfully transcribed recording {recording_id}")
+                    # Update recording with transcript
+                    recordings[recording_id]["status"] = RecordingStatus.COMPLETED
+                    recordings[recording_id]["transcript"] = result
+                    recordings[recording_id]["progress"] = 100
+                    recordings[recording_id]["chunks_processed"] = 1
+                else:
+                    logger.error(f"Failed to transcribe recording {recording_id}: {result}")
+                    # Update recording with error
+                    recordings[recording_id]["status"] = RecordingStatus.FAILED
+                    recordings[recording_id]["error"] = result
+                    recordings[recording_id]["progress"] = 100
+            except Exception as e:
+                logger.error(f"Error processing recording {recording_id} with batch API: {e}")
+                recordings[recording_id]["status"] = RecordingStatus.FAILED
+                recordings[recording_id]["error"] = f"Error processing recording: {str(e)}"
+                recordings[recording_id]["progress"] = 100
+        
+        # Start processing in background
+        background_tasks.add_task(process_with_batch_api)
+        
+        return {
+            "recording_id": recording_id,
+            "status": RecordingStatus.PROCESSING,
+            "message": "Processing recording with Sarvam Batch API",
+            "source": source,
+            "format": format,
+            "chunks_total": 1
+        }
+        
+        # We no longer need chunking as the batch API handles it
+        try:
+            # Create recording entry with simplified structure
             recordings[recording_id] = {
                 "id": recording_id,
                 "timestamp": datetime.now(),
-                "duration": sum(len(chunk) for chunk in audio_chunks) / 1000,  # Duration in seconds
                 "status": RecordingStatus.PROCESSING,
                 "transcript": None,
                 "error": None,
                 "source": source,
-                "format": format,
-                "chunks_total": len(audio_chunks),
-                "chunks_processed": 0,
-                "chunks_failed": 0,
-                "progress": 0
+                "format": format
             }
-            
-            # Process chunks in background
-            background_tasks.add_task(process_recording, recording_id, audio_chunks)
             
             return {
                 "recording_id": recording_id,
                 "status": RecordingStatus.PROCESSING,
-                "message": f"Processing {len(audio_chunks)} audio chunks",
+                "message": "Processing with batch API",
                 "source": source,
-                "format": format,
-                "chunks_total": len(audio_chunks)
+                "format": format
             }
         except HTTPException as e:
             raise e
