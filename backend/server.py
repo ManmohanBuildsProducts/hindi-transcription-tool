@@ -59,7 +59,7 @@ SARVAM_API_KEY = os.environ.get("SARVAM_API_KEY")
 if not SARVAM_API_KEY:
     logger.warning("SARVAM_API_KEY not set in environment, using default test key")
     SARVAM_API_KEY = "ec7650e8-3560-48c7-8c69-649f1c659680"  # Default key, will be used if env var is not set
-SARVAM_API_URL = os.environ.get("SARVAM_API_URL", "https://api.sarvam.ai/v1/transcribe/batch")
+SARVAM_API_URL = os.environ.get("SARVAM_API_URL", "https://api.sarvam.ai/v1/asr")
 CHUNK_DURATION = 8 * 60 * 1000  # 8 minutes in milliseconds
 MAX_RETRIES = 3  # Maximum retries for API calls
 
@@ -358,12 +358,22 @@ async def transcribe_chunk(chunk: AudioSegment, chunk_index: int, recording_id: 
             "Content-Type": "application/json"
         }
         
+        # Format according to Sarvam AI ASR API
         data = {
-            "audio": audio_base64,
-            "source_lang": "hi",
-            "task_type": "transcribe",
-            "audio_format": "wav"
+            "audio": {
+                "data": audio_base64
+            },
+            "config": {
+                "language_code": "hi",
+                "use_enhanced": True
+            }
         }
+        
+        # Log request details (without full audio data)
+        log_data = data.copy()
+        if 'audio' in log_data:
+            log_data['audio'] = f"[BASE64_DATA_LENGTH:{len(log_data['audio'])}]"
+        logger.info(f"API request data for chunk {chunk_index}: {log_data}")
         
         logger.info(f"Sending chunk {chunk_index} to Sarvam API with {len(audio_base64)} chars of base64 data")
         
@@ -373,15 +383,34 @@ async def transcribe_chunk(chunk: AudioSegment, chunk_index: int, recording_id: 
             try:
                 logger.info(f"API attempt {retries+1} for chunk {chunk_index}")
                 async with aiohttp.ClientSession() as session:
+                    # Log API request details
+                    logger.info(f"API URL: {SARVAM_API_URL}")
+                    logger.info(f"API Headers for chunk {chunk_index}: Authorization: Bearer {SARVAM_API_KEY[:5]}...{SARVAM_API_KEY[-5:]}, Content-Type: application/json")
+                    
                     async with session.post(SARVAM_API_URL, headers=headers, json=data, timeout=60) as response:
                         logger.info(f"API response status for chunk {chunk_index}: {response.status}")
                         response_text = await response.text()
-                        logger.info(f"API response for chunk {chunk_index}: {response_text[:200]}...")
+                        logger.info(f"API response headers for chunk {chunk_index}: {dict(response.headers)}")
+                        logger.info(f"API full response for chunk {chunk_index}: {response_text}")
                         
                         if response.status == 200:
                             try:
                                 result = json.loads(response_text)
-                                transcribed_text = result.get("text", "").strip()
+                                # Handle different response formats
+                                if "text" in result:
+                                    # Simple format
+                                    transcribed_text = result.get("text", "").strip()
+                                elif "results" in result:
+                                    # ASR format with multiple results
+                                    transcribed_text = " ".join([
+                                        alternative.get("transcript", "")
+                                        for result_item in result.get("results", [])
+                                        for alternative in result_item.get("alternatives", [])
+                                    ]).strip()
+                                else:
+                                    # Unknown format
+                                    logger.warning(f"Unknown response format: {result}")
+                                    transcribed_text = str(result)
                                 
                                 if transcribed_text:
                                     logger.info(f"Successful transcription for chunk {chunk_index}: {transcribed_text[:50]}...")
@@ -395,19 +424,27 @@ async def transcribe_chunk(chunk: AudioSegment, chunk_index: int, recording_id: 
                                     return ""
                                     
                             except json.JSONDecodeError as e:
-                                logger.error(f"Failed to parse response for chunk {chunk_index}: {e}, response: {response_text[:100]}...")
+                                logger.error(f"Failed to parse response for chunk {chunk_index}: {e}, response: {response_text}")
                                 if retries == MAX_RETRIES - 1:
                                     jobs[job_id]["status"] = "failed"
                                     jobs[job_id]["error"] = f"Failed to parse API response: {e}"
                                     return None
                         
+                        elif response.status == 401 or response.status == 403:
+                            error_msg = f"API Authentication error: Status {response.status}. Please check API key."
+                            logger.error(f"API auth failed for chunk {chunk_index}. Status: {response.status}, Response: {response_text}")
+                            if retries == MAX_RETRIES - 1:
+                                jobs[job_id]["status"] = "failed"
+                                jobs[job_id]["error"] = error_msg
+                                return None
+                                
                         elif response.status == 429:  # Rate limit
                             logger.warning(f"Rate limited for chunk {chunk_index}, retrying with backoff")
                             await asyncio.sleep(2 ** retries)  # Exponential backoff
                         
                         else:
-                            error_msg = f"API error: Status {response.status}, Body: {response_text[:200]}..."
-                            logger.error(error_msg)
+                            error_msg = f"API error: Status {response.status}. Please check API documentation."
+                            logger.error(f"API error for chunk {chunk_index}: Status {response.status}, response: {response_text}")
                             if retries == MAX_RETRIES - 1:
                                 jobs[job_id]["status"] = "failed"
                                 jobs[job_id]["error"] = error_msg
@@ -550,12 +587,22 @@ async def create_recording(
                     "Content-Type": "application/json"
                 }
                 
+                # Format according to Sarvam AI ASR API
                 data = {
-                    "audio": audio_base64,
-                    "source_lang": "hi",
-                    "task_type": "transcribe",
-                    "audio_format": format
+                    "audio": {
+                        "data": audio_base64
+                    },
+                    "config": {
+                        "language_code": "hi",
+                        "use_enhanced": True
+                    }
                 }
+                
+                # Log request details (without full audio data)
+                log_data = data.copy()
+                if 'audio' in log_data:
+                    log_data['audio'] = f"[BASE64_DATA_LENGTH:{len(log_data['audio'])}]"
+                logger.info(f"API request data: {log_data}")
                 
                 logger.info(f"Sending direct API request for small recording ({len(content)} bytes)")
                 
@@ -579,14 +626,34 @@ async def create_recording(
                 async def process_direct_api():
                     try:
                         async with aiohttp.ClientSession() as session:
+                            # Log the full API request for debugging
+                            logger.info(f"API URL: {SARVAM_API_URL}")
+                            logger.info(f"API Headers: Authorization: Bearer {SARVAM_API_KEY[:5]}...{SARVAM_API_KEY[-5:]}, Content-Type: application/json")
+                            
                             async with session.post(SARVAM_API_URL, headers=headers, json=data, timeout=60) as response:
                                 response_text = await response.text()
                                 logger.info(f"Direct API response status: {response.status}")
+                                logger.info(f"Direct API response headers: {dict(response.headers)}")
+                                logger.info(f"Direct API response full text: {response_text}")
                                 
                                 if response.status == 200:
                                     try:
                                         result = json.loads(response_text)
-                                        transcript = result.get("text", "").strip()
+                                        # Handle different response formats
+                                        if "text" in result:
+                                            # Simple format
+                                            transcript = result.get("text", "").strip()
+                                        elif "results" in result:
+                                            # ASR format with multiple results
+                                            transcript = " ".join([
+                                                alternative.get("transcript", "")
+                                                for result_item in result.get("results", [])
+                                                for alternative in result_item.get("alternatives", [])
+                                            ]).strip()
+                                        else:
+                                            # Unknown format
+                                            logger.warning(f"Unknown response format: {result}")
+                                            transcript = str(result)
                                         
                                         if transcript:
                                             recordings[recording_id]["status"] = RecordingStatus.COMPLETED
@@ -602,10 +669,18 @@ async def create_recording(
                                         recordings[recording_id]["status"] = RecordingStatus.FAILED
                                         recordings[recording_id]["error"] = f"Failed to parse API response: {e}"
                                         logger.error(f"Failed to parse direct API response: {e}, response: {response_text[:100]}...")
+                                elif response.status == 401 or response.status == 403:
+                                    recordings[recording_id]["status"] = RecordingStatus.FAILED
+                                    recordings[recording_id]["error"] = f"API Authentication error: Status {response.status}. Please check API key."
+                                    logger.error(f"API authentication failed. Status: {response.status}, Response: {response_text}")
+                                elif response.status == 429:
+                                    recordings[recording_id]["status"] = RecordingStatus.FAILED
+                                    recordings[recording_id]["error"] = "API rate limit exceeded. Please try again later."
+                                    logger.error(f"API rate limit exceeded: {response_text}")
                                 else:
                                     recordings[recording_id]["status"] = RecordingStatus.FAILED
-                                    recordings[recording_id]["error"] = f"API error: Status {response.status}"
-                                    logger.error(f"Direct API error: Status {response.status}, response: {response_text[:100]}...")
+                                    recordings[recording_id]["error"] = f"API error: Status {response.status}. Please check API documentation for details."
+                                    logger.error(f"Direct API error: Status {response.status}, response: {response_text}")
                     except Exception as e:
                         recordings[recording_id]["status"] = RecordingStatus.FAILED
                         recordings[recording_id]["error"] = f"API request failed: {str(e)}"
