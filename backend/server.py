@@ -487,7 +487,7 @@ async def transcribe_chunk(chunk: AudioSegment, chunk_index: int, recording_id: 
 
 @app.get("/")
 async def home():
-    return {"status": "healthy", "service": "Hindi Audio Transcription API - Root"}
+    return {"status": "healthy", "service": "Hindi Audio Transcription API - Root", "version": "1.0.1"}
 
 @app.get("/api")
 async def root():
