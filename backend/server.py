@@ -600,6 +600,18 @@ async def create_recording(
         # Use the Sarvam Batch API for transcription
         async def process_with_batch_api():
             try:
+                # Try to estimate actual audio duration
+                try:
+                    # Load audio to get actual duration
+                    audio = AudioSegment.from_file(io.BytesIO(content))
+                    actual_duration = len(audio) / 1000.0  # Convert ms to seconds
+                    recordings[recording_id]["duration"] = actual_duration
+                    logger.info(f"Estimated recording duration: {actual_duration} seconds")
+                except Exception as dur_err:
+                    logger.warning(f"Failed to calculate duration: {dur_err}")
+                    # Set a reasonable default
+                    recordings[recording_id]["duration"] = 30.0
+                
                 # Create API client
                 api_client = SarvamBatchAPI(SARVAM_API_KEY)
                 
@@ -614,17 +626,25 @@ async def create_recording(
                     recordings[recording_id]["transcript"] = result
                     recordings[recording_id]["progress"] = 100
                     recordings[recording_id]["chunks_processed"] = 1
+                    # Update timestamp to current time to reflect the actual completion time
+                    recordings[recording_id]["timestamp"] = datetime.now()
                 else:
                     logger.error(f"Failed to transcribe recording {recording_id}: {result}")
                     # Update recording with error
                     recordings[recording_id]["status"] = RecordingStatus.FAILED
                     recordings[recording_id]["error"] = result
                     recordings[recording_id]["progress"] = 100
+                    # Include detailed logs in the recording for frontend display
+                    recordings[recording_id]["debug_logs"] = api_client.get_debug_logs()
+                    # Update timestamp to current time
+                    recordings[recording_id]["timestamp"] = datetime.now()
             except Exception as e:
                 logger.error(f"Error processing recording {recording_id} with batch API: {e}")
                 recordings[recording_id]["status"] = RecordingStatus.FAILED
                 recordings[recording_id]["error"] = f"Error processing recording: {str(e)}"
                 recordings[recording_id]["progress"] = 100
+                # Update timestamp to current time
+                recordings[recording_id]["timestamp"] = datetime.now()
         
         # Start processing in background
         background_tasks.add_task(process_with_batch_api)
@@ -679,8 +699,11 @@ async def create_recording(
 @app.get("/api/recordings")
 async def list_recordings():
     # Convert recordings dict to list and sort by timestamp (newest first)
-    recordings_list = [
-        {
+    recordings_list = []
+    
+    for recording_id, recording_data in recordings.items():
+        # Create base recording entry
+        recording_entry = {
             "id": recording_data["id"],
             "timestamp": recording_data["timestamp"],
             "duration": recording_data["duration"],
@@ -693,8 +716,12 @@ async def list_recordings():
             "warning": recording_data.get("warning", None),
             "transcript": recording_data.get("transcript", None) if recording_data["status"] == RecordingStatus.COMPLETED else None
         }
-        for recording_id, recording_data in recordings.items()
-    ]
+        
+        # Add debug logs if they exist and there was an error
+        if recording_data["status"] == RecordingStatus.FAILED and "debug_logs" in recording_data:
+            recording_entry["debug_logs"] = recording_data["debug_logs"]
+        
+        recordings_list.append(recording_entry)
     
     # Sort by timestamp, newest first
     recordings_list.sort(key=lambda x: x["timestamp"], reverse=True)
@@ -711,7 +738,8 @@ async def get_recording(recording_id: str):
     
     recording_data = recordings[recording_id]
     
-    return {
+    # Create response with basic info
+    response = {
         "id": recording_data["id"],
         "timestamp": recording_data["timestamp"],
         "duration": recording_data["duration"],
@@ -724,6 +752,12 @@ async def get_recording(recording_id: str):
         "warning": recording_data.get("warning", None),
         "transcript": recording_data.get("transcript", None) if recording_data["status"] == RecordingStatus.COMPLETED else None
     }
+    
+    # Add debug logs if they exist and there was an error
+    if recording_data["status"] == RecordingStatus.FAILED and "debug_logs" in recording_data:
+        response["debug_logs"] = recording_data["debug_logs"]
+    
+    return response
 
 @app.delete("/api/recordings/{recording_id}")
 async def delete_recording(recording_id: str):

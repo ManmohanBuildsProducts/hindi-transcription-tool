@@ -8,6 +8,8 @@ import asyncio
 from typing import Optional, Dict, Any, Tuple, List
 import os
 import io
+import tempfile
+import traceback
 from pydub import AudioSegment
 
 logger = logging.getLogger(__name__)
@@ -22,47 +24,75 @@ class SarvamBatchAPI:
         self.init_url = "https://api.sarvam.ai/speech-to-text-translate/job/init"
         self.status_url_template = "https://api.sarvam.ai/speech-to-text-translate/job/{job_id}/status"
         self.submit_url = "https://api.sarvam.ai/speech-to-text-translate/job"
+        self.debug_logs = []  # Store debug logs for frontend display
+        
+    def log(self, level: str, message: str):
+        """Add a log message with timestamp for debugging"""
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        log_entry = f"[{timestamp}] {level.upper()}: {message}"
+        logger.log(getattr(logging, level.upper()), message)
+        self.debug_logs.append(log_entry)
+        # Keep only the last 100 log entries to avoid excessive memory usage
+        if len(self.debug_logs) > 100:
+            self.debug_logs = self.debug_logs[-100:]
+            
+    def get_debug_logs(self) -> str:
+        """Get all debug logs as a single string for frontend display"""
+        return "\n".join(self.debug_logs)
         
     async def transcribe_audio(self, audio_data: bytes, source_lang: str = "hi") -> Tuple[bool, str]:
         """Process audio through the Sarvam Batch API"""
         try:
             # Step 1: Initialize a job
+            self.log("info", "Starting job initialization")
             job_info = await self._initialize_job()
             if not job_info:
+                self.log("error", "Failed to initialize job")
                 return False, "Failed to initialize job"
                 
             job_id = job_info.get("job_id")
             input_storage_path = job_info.get("input_storage_path")
             
             if not job_id or not input_storage_path:
+                self.log("error", f"Invalid job information returned from API: {job_info}")
                 return False, "Invalid job information returned from API"
                 
-            logger.info(f"Initialized job {job_id} with input path {input_storage_path}")
+            self.log("info", f"Initialized job {job_id} with input path {input_storage_path}")
             
             # Step 2: Upload audio to Azure blob storage
+            self.log("info", f"Uploading audio for job {job_id} to storage path {input_storage_path}")
             upload_success = await self._upload_audio(input_storage_path, audio_data)
             if not upload_success:
-                return False, "Failed to upload audio to storage"
+                self.log("error", "All upload methods failed - could not upload audio to storage")
+                return False, "Failed to upload audio to storage. Check network connection and try again."
                 
-            logger.info(f"Successfully uploaded audio for job {job_id}")
+            self.log("info", f"Successfully uploaded audio for job {job_id}")
             
             # Step 3: Start the job
+            self.log("info", f"Starting job {job_id}")
             start_success = await self._start_job(job_id)
             if not start_success:
-                return False, "Failed to start transcription job"
+                self.log("error", f"Failed to start job {job_id}")
+                return False, "Failed to start transcription job. Please try again."
                 
-            logger.info(f"Successfully started job {job_id}")
+            self.log("info", f"Successfully started job {job_id}")
             
             # Step 4: Poll for job completion
+            self.log("info", f"Polling for job {job_id} completion")
             transcript, error = await self._poll_job_status(job_id)
             if error:
+                self.log("error", f"Error during job processing: {error}")
                 return False, f"Error during job processing: {error}"
                 
             # Return the transcript
+            self.log("info", f"Successfully completed job {job_id}")
             return True, transcript
                 
         except Exception as e:
-            logger.error(f"Error in transcribe_audio: {e}")
+            error_msg = f"Error in transcribe_audio: {e}"
+            self.log("error", error_msg)
+            import traceback
+            self.log("error", f"Traceback: {traceback.format_exc()}")
             return False, f"Error during transcription: {str(e)}"
             
     async def _initialize_job(self) -> Optional[Dict[str, Any]]:
@@ -89,7 +119,7 @@ class SarvamBatchAPI:
         """Upload audio data to Azure storage"""
         try:
             # Log the storage path for debugging
-            logger.info(f"Storage path for upload: {storage_path}")
+            self.log("info", f"Storage path for upload: {storage_path}")
             
             # Try to convert audio data but handle errors gracefully
             try:
@@ -102,22 +132,22 @@ class SarvamBatchAPI:
                 audio_buffer = io.BytesIO()
                 audio.export(audio_buffer, format="wav")
                 wav_data = audio_buffer.getvalue()
-                logger.info(f"Successfully converted audio to WAV format, size: {len(wav_data)} bytes")
+                self.log("info", f"Successfully converted audio to WAV format, size: {len(wav_data)} bytes")
             except Exception as e:
-                logger.warning(f"Failed to convert audio, using original data: {e}")
+                self.log("warning", f"Failed to convert audio, using original data: {e}")
                 # If conversion fails, use the original data
                 wav_data = audio_data
             
             # Create the audio.wav file at the storage path
             # Use the exact URL format required by Azure Blob Storage
             upload_url = f"{storage_path}/audio.wav"
-            logger.info(f"Upload URL: {upload_url}")
+            self.log("info", f"Upload URL: {upload_url}")
             
             # Try with different headers and methods if the first attempt fails
             
             # Method 1: aiohttp PUT with Azure headers
             try:
-                logger.info("Trying upload method 1: aiohttp PUT with Azure headers")
+                self.log("info", "Trying upload method 1: aiohttp PUT with Azure headers")
                 async with aiohttp.ClientSession() as session:
                     async with session.put(
                         upload_url,
@@ -130,17 +160,17 @@ class SarvamBatchAPI:
                         timeout=120  # Longer timeout for audio upload
                     ) as response:
                         if response.status in (200, 201, 204):
-                            logger.info(f"Upload successful with method 1: {response.status}")
+                            self.log("info", f"Upload successful with method 1: {response.status}")
                             return True
                         else:
                             error_text = await response.text()
-                            logger.warning(f"Method 1 failed: Status {response.status}, Response: {error_text}")
+                            self.log("warning", f"Method 1 failed: Status {response.status}, Response: {error_text}")
             except Exception as e:
-                logger.warning(f"Method 1 exception: {e}")
+                self.log("warning", f"Method 1 exception: {e}")
             
             # Method 2: requests PUT (synchronous but more reliable)
             try:
-                logger.info("Trying upload method 2: requests PUT (synchronous)")
+                self.log("info", "Trying upload method 2: requests PUT (synchronous)")
                 import requests
                 response = requests.put(
                     upload_url,
@@ -152,16 +182,16 @@ class SarvamBatchAPI:
                     timeout=120
                 )
                 if response.status_code in (200, 201, 204):
-                    logger.info(f"Upload successful with method 2: {response.status_code}")
+                    self.log("info", f"Upload successful with method 2: {response.status_code}")
                     return True
                 else:
-                    logger.warning(f"Method 2 failed: Status {response.status_code}, Response: {response.text}")
+                    self.log("warning", f"Method 2 failed: Status {response.status_code}, Response: {response.text}")
             except Exception as e:
-                logger.warning(f"Method 2 exception: {e}")
+                self.log("warning", f"Method 2 exception: {e}")
             
             # Method 3: Try with different content type
             try:
-                logger.info("Trying upload method 3: different content type")
+                self.log("info", "Trying upload method 3: different content type")
                 response = requests.put(
                     upload_url,
                     data=wav_data,
@@ -172,18 +202,60 @@ class SarvamBatchAPI:
                     timeout=120
                 )
                 if response.status_code in (200, 201, 204):
-                    logger.info(f"Upload successful with method 3: {response.status_code}")
+                    self.log("info", f"Upload successful with method 3: {response.status_code}")
                     return True
                 else:
-                    logger.warning(f"Method 3 failed: Status {response.status_code}, Response: {response.text}")
+                    self.log("warning", f"Method 3 failed: Status {response.status_code}, Response: {response.text}")
             except Exception as e:
-                logger.warning(f"Method 3 exception: {e}")
+                self.log("warning", f"Method 3 exception: {e}")
+            
+            # Method 4: Try with Azure Blob client library
+            try:
+                self.log("info", "Trying upload method 4: Using azure-storage-blob client")
+                # We'll use temporary file to ensure the data is written correctly
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+                    temp_file_path = temp_file.name
+                    temp_file.write(wav_data)
+                    temp_file.flush()
+                
+                self.log("info", f"Created temporary file: {temp_file_path}")
+                
+                # Use subprocess to call a curl command
+                # This is a more direct approach that often works when others fail
+                import subprocess
+                cmd = [
+                    'curl', '-X', 'PUT',
+                    '-H', 'x-ms-blob-type: BlockBlob',
+                    '-H', 'Content-Type: audio/wav',
+                    '--data-binary', f'@{temp_file_path}',
+                    upload_url
+                ]
+                self.log("info", f"Running curl command: {' '.join(cmd)}")
+                
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=120
+                )
+                
+                if result.returncode == 0:
+                    self.log("info", f"Upload successful with method 4 (curl): {result.returncode}")
+                    return True
+                else:
+                    self.log("warning", f"Method 4 failed: Return code {result.returncode}, Stdout: {result.stdout}, Stderr: {result.stderr}")
+                
+                # Clean up temp file
+                os.unlink(temp_file_path)
+                
+            except Exception as e:
+                self.log("warning", f"Method 4 exception: {e}")
             
             # If we get here, all methods failed
-            logger.error("All upload methods failed")
+            self.log("error", "All upload methods failed - could not upload audio to Azure storage")
             return False
         except Exception as e:
-            logger.error(f"Error in _upload_audio: {e}")
+            self.log("error", f"Error in _upload_audio: {e}")
             return False
     
     async def _start_job(self, job_id: str) -> bool:
