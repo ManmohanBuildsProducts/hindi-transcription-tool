@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from datetime import datetime
 import os
 import logging
+import sys
 from pathlib import Path
 import json
 import requests
@@ -12,6 +13,7 @@ from typing import List, Optional, Dict
 import asyncio
 import aiohttp
 import uuid
+import subprocess
 from pydub import AudioSegment
 import io
 import tempfile
@@ -20,6 +22,16 @@ from dotenv import load_dotenv
 # Setup environment
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
+
+# Set up ffmpeg for Render deployment
+try:
+    import download_ffmpeg
+    download_ffmpeg.main()
+    logger = logging.getLogger(__name__)
+    logger.info("ffmpeg setup completed")
+except Exception as e:
+    logger = logging.getLogger(__name__)
+    logger.warning(f"ffmpeg setup failed: {e}, will try to use system ffmpeg if available")
 
 # Configure logging
 logging.basicConfig(
