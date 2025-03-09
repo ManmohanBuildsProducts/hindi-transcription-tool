@@ -224,18 +224,26 @@ function App() {
       }
 
       // Determine MIME type based on browser support
+      // Prioritize formats that work well with our backend
       const mimeTypes = [
-        'audio/webm;codecs=opus',
         'audio/webm',
+        'audio/webm;codecs=opus',
+        'audio/wav',
+        'audio/wave',
         'audio/ogg;codecs=opus',
-        'audio/mp3'
+        'audio/ogg',
+        'audio/mp3',
+        'audio/mpeg'
       ];
       
-      const supportedType = mimeTypes.find(type => MediaRecorder.isTypeSupported(type));
+      let supportedType = mimeTypes.find(type => MediaRecorder.isTypeSupported(type));
       
       if (!supportedType) {
-        throw new Error('Your browser does not support any compatible audio format');
+        console.warn('No preferred MIME type supported, using default');
+        supportedType = ''; // Let the browser pick a default
       }
+      
+      console.log('Using MIME type:', supportedType);
 
       // Create media recorder
       const options = {
@@ -582,12 +590,37 @@ function App() {
                     setIsProcessing(true);
                     setError(null);
                     
-                    // Create a test FormData with an empty file
+                    console.log("Starting test transcription...");
+                    console.log("Backend URL:", BACKEND_URL);
+                    
+                    // Use a proper audio file for testing - an empty WAV header
+                    const wavHeader = new Uint8Array([
+                      0x52, 0x49, 0x46, 0x46, // "RIFF"
+                      0x24, 0x00, 0x00, 0x00, // Chunk size (36 bytes)
+                      0x57, 0x41, 0x56, 0x45, // "WAVE"
+                      0x66, 0x6d, 0x74, 0x20, // "fmt "
+                      0x10, 0x00, 0x00, 0x00, // Subchunk1 size (16 bytes)
+                      0x01, 0x00,             // Audio format (1 = PCM)
+                      0x01, 0x00,             // Number of channels (1)
+                      0x44, 0xac, 0x00, 0x00, // Sample rate (44100)
+                      0x88, 0x58, 0x01, 0x00, // Byte rate (44100 * 1 * 2)
+                      0x02, 0x00,             // Block align
+                      0x10, 0x00,             // Bits per sample (16)
+                      0x64, 0x61, 0x74, 0x61, // "data"
+                      0x00, 0x00, 0x00, 0x00  // Data size (0 bytes)
+                    ]);
+                    
+                    // Create test audio file with proper WAV header
+                    const testBlob = new Blob([wavHeader], { type: "audio/wav" });
+                    const testFile = new File([testBlob], "test_recording.wav", { type: "audio/wav" });
+                    
+                    console.log("Created test file:", testFile.name, "Size:", testFile.size, "Type:", testFile.type);
+                    
                     const formData = new FormData();
-                    const testBlob = new Blob(["test"], { type: "audio/wav" });
-                    const testFile = new File([testBlob], "test_recording", { type: "audio/wav" });
                     formData.append('audio', testFile);
                     formData.append('source', 'test');
+                    
+                    console.log("Submitting test request...");
                     
                     // Submit test recording request
                     const response = await fetch(`${BACKEND_URL}/api/recordings`, {
@@ -595,12 +628,16 @@ function App() {
                       body: formData
                     });
                     
+                    console.log("Response status:", response.status);
+                    
                     if (!response.ok) {
                       const errorText = await response.text();
+                      console.error("Test failed response:", errorText);
                       throw new Error(`Test failed: ${errorText}`);
                     }
                     
                     const result = await response.json();
+                    console.log("Test succeeded:", result);
                     
                     // Poll for completion
                     await pollRecordingStatus(result.recording_id);

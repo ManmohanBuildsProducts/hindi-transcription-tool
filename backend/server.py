@@ -417,28 +417,69 @@ async def create_recording(
                 "chunks_total": 1
             }
 
+        # Log incoming file details for debugging
+        logger.info(f"Received audio file: {audio.filename}, content_type: {audio.content_type}")
+        
         # Validate audio source
-        if source not in ["microphone", "system", "combined"]:
+        if source not in ["microphone", "system", "combined", "test"]:  # Added 'test' as valid source
+            logger.warning(f"Invalid source: {source}")
             raise HTTPException(
                 status_code=400,
                 detail="Invalid audio source. Must be 'microphone', 'system', or 'combined'"
             )
 
-        # Validate file format
-        if not audio.content_type in ["audio/webm", "audio/wav", "audio/wave", "audio/mp3", "audio/mpeg"]:
-            raise HTTPException(
-                status_code=415,
-                detail="Unsupported audio format. Please use WAV, MP3, or WebM format."
-            )
-
-        # Read content with size check
-        try:
-            content = await audio.read()
-            if len(content) == 0:
+        # More permissive content type check
+        valid_types = ["audio/webm", "audio/wav", "audio/wave", "audio/mp3", "audio/mpeg", 
+                      "audio/ogg", "audio/x-wav", "audio/x-m4a"]
+        
+        # Check file extension as a fallback for browsers that don't set content_type correctly
+        valid_extensions = [".mp3", ".wav", ".wave", ".webm", ".ogg", ".m4a"]
+        file_ext = os.path.splitext(audio.filename)[1].lower() if audio.filename else ""
+        
+        if not (audio.content_type in valid_types or file_ext in valid_extensions):
+            logger.warning(f"Unsupported audio format: {audio.content_type}, filename: {audio.filename}")
+            # Try to determine format from filename as a last resort
+            try:
+                # For debugging - save the file temporarily to check what it is
+                content = await audio.read()
+                if len(content) > 0:
+                    logger.info(f"File size: {len(content)} bytes")
+                    # Reset the file pointer for later reading
+                    await audio.seek(0)
+                    # We'll proceed anyway since we have a more robust audio parsing later
+                    format = "wav"  # Default to wav
+                    if audio.filename:
+                        if audio.filename.lower().endswith(".mp3"):
+                            format = "mp3"
+                        elif audio.filename.lower().endswith(".webm"):
+                            format = "webm"
+                        elif audio.filename.lower().endswith(".ogg"):
+                            format = "ogg"
+                    logger.info(f"Determined format from filename: {format}")
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Empty audio file received"
+                    )
+            except Exception as e:
+                logger.error(f"Error checking audio file: {str(e)}")
                 raise HTTPException(
-                    status_code=400,
-                    detail="Empty audio file received"
+                    status_code=415,
+                    detail="Unsupported audio format. Please use WAV, MP3, or WebM format."
                 )
+        else:
+            logger.info(f"Valid audio format detected: {audio.content_type or file_ext}")
+
+        # Read content with size check (but only if we haven't read it already)
+        try:
+            if 'content' not in locals():
+                content = await audio.read()
+                if len(content) == 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Empty audio file received"
+                    )
+                logger.info(f"Successfully read file content, size: {len(content)} bytes")
         except Exception as e:
             logger.error(f"Error reading audio file: {str(e)}")
             raise HTTPException(
