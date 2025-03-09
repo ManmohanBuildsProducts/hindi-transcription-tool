@@ -302,13 +302,26 @@ function App() {
       }
 
       // Create a single blob from all chunks
+      const mimeType = mediaRecorder.current.mimeType || 'audio/webm';
       const audioBlob = new Blob(audioChunks.current, { 
-        type: mediaRecorder.current.mimeType 
+        type: mimeType 
+      });
+      
+      // Create a file with proper extension based on MIME type
+      let fileExtension = 'webm';
+      if (mimeType.includes('mp3')) {
+        fileExtension = 'mp3';
+      } else if (mimeType.includes('wav') || mimeType.includes('wave')) {
+        fileExtension = 'wav';
+      }
+      
+      const audioFile = new File([audioBlob], `recording.${fileExtension}`, { 
+        type: mimeType 
       });
 
       // Upload recording
       const formData = new FormData();
-      formData.append('audio', audioBlob);
+      formData.append('audio', audioFile);
       formData.append('source', audioSource);
 
       const response = await fetch(`${BACKEND_URL}/api/recordings`, {
@@ -571,10 +584,10 @@ function App() {
                     
                     // Create a test FormData with an empty file
                     const formData = new FormData();
-                    const testBlob = new Blob(["test"], { type: "text/plain" });
-                    const testFile = new File([testBlob], "test_recording", { type: "text/plain" });
+                    const testBlob = new Blob(["test"], { type: "audio/wav" });
+                    const testFile = new File([testBlob], "test_recording", { type: "audio/wav" });
                     formData.append('audio', testFile);
-                    formData.append('source', audioSource);
+                    formData.append('source', 'test');
                     
                     // Submit test recording request
                     const response = await fetch(`${BACKEND_URL}/api/recordings`, {
