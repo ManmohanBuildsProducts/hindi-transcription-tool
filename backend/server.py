@@ -361,6 +361,10 @@ async def process_recording(recording_id: str, audio_chunks: List[AudioSegment])
             "progress": recordings[recording_id].get("progress", 0)
         })
 
+@app.get("/")
+async def home():
+    return {"status": "healthy", "service": "Hindi Audio Transcription API - Root"}
+
 @app.get("/api")
 async def root():
     return {"status": "healthy", "service": "Hindi Audio Transcription API"}
